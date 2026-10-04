@@ -166,6 +166,23 @@ class NotificationManager:
         except Exception as e:
             logger.error(f"📱 处理消息通知失败: {self._safe_str(e)}")
 
+    def schedule_unread_notification(self, chat_id: str, notifications: list,
+                                     message: str, context: dict) -> None:
+        """登记「延迟到仍未读才发」的消息通知（供 auto_reply_service 等入口调用）
+
+        auto_reply_service.handle_chat_message 走的是自己那份 _send_notification，
+        必须也从这里登记，否则未读延迟与 email_api 渠道对它不生效。
+        """
+        self._schedule_unread_notification(
+            chat_id or f"unknown_{context.get('buyer_id') or 'unknown'}",
+            {
+                "chat_id": chat_id,
+                "notifications": notifications,
+                "message": message,
+                "context": context,
+            },
+        )
+
     def _schedule_unread_notification(self, key: str, payload: dict) -> None:
         """登记一条「延迟到仍未读才发」的通知任务
 
@@ -547,8 +564,12 @@ class NotificationManager:
                     await send_email_notification(config_data, channel_message, attachment_path)
                     notification_sent = True
                 elif channel_type in ('email_api', 'mail_api', 'email_http'):
+                    # 邮件标题带上账号，否则多个账号的未读通知在收件箱里分不清是谁的
+                    account = (template_context or {}).get('account') or self.cookie_id
+                    title = config_data.get('title') or '闲鱼自动回复通知'
                     await send_email_api_notification(
-                        config_data, channel_message, config_data.get('title')
+                        config_data, channel_message,
+                        f"{title} - {account}" if account else title,
                     )
                     notification_sent = True
                 elif channel_type == 'webhook':

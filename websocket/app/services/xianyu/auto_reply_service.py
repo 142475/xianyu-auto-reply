@@ -1128,58 +1128,14 @@ class AutoReplyService:
                 "time": msg_time or time.strftime('%Y-%m-%d %H:%M:%S'),
             }
             
-            # 发送通知到各渠道
-            for notification in notifications:
-                try:
-                    # 检查通知是否启用
-                    if not notification.get('enabled', True):
-                        continue
-                    
-                    channel_type = notification.get('channel_type', '')
-                    channel_config = notification.get('channel_config', {}) or {}
-                    
-                    # 使用公共通知工具函数
-                    from common.utils.notification_utils import (
-                        parse_notification_config,
-                        send_dingtalk_notification,
-                        send_feishu_notification,
-                        send_bark_notification,
-                        send_email_notification,
-                        send_webhook_notification,
-                        send_wechat_notification,
-                        send_telegram_notification,
-                        send_pushplus_notification
-                    )
-                    
-                    config_data = parse_notification_config(channel_config)
-                    channel_message = render_notification_template(
-                        config_data,
-                        "chat",
-                        template_context,
-                        notification_content,
-                    )
-                    
-                    if channel_type in ('dingtalk', 'ding_talk'):
-                        await send_dingtalk_notification(config_data, channel_message)
-                    elif channel_type in ('feishu', 'lark'):
-                        await send_feishu_notification(config_data, channel_message)
-                    elif channel_type == 'bark':
-                        await send_bark_notification(config_data, channel_message)
-                    elif channel_type == 'email':
-                        await send_email_notification(config_data, channel_message)
-                    elif channel_type == 'webhook':
-                        await send_webhook_notification(config_data, channel_message)
-                    elif channel_type in ('wechat', 'wechat_work'):
-                        await send_wechat_notification(config_data, channel_message)
-                    elif channel_type == 'telegram':
-                        await send_telegram_notification(config_data, channel_message)
-                    elif channel_type == 'pushplus':
-                        await send_pushplus_notification(config_data, channel_message)
-                    else:
-                        logger.warning(f"【{self.cookie_id}】不支持的通知渠道类型: {channel_type}")
-                        
-                except Exception as e:
-                    logger.error(f"【{self.cookie_id}】发送{channel_type}通知失败: {e}")
+            # 延迟到 unread_notify_delay 秒后仍未读才发。
+            # 与 NotificationManager 共用一套待发任务、已读判断与渠道实现，
+            # 避免两份实现各写一半（email_api 渠道曾经只加在另一边而完全不生效）。
+            from app.services.xianyu.notification_manager import NotificationManager
+
+            NotificationManager(self.cookie_id).schedule_unread_notification(
+                chat_id, notifications, notification_content, template_context
+            )
                     
         except Exception as e:
             logger.error(f"【{self.cookie_id}】发送消息通知失败: {e}")
