@@ -206,7 +206,7 @@ export interface NotificationChannel {
   id: string
   cookie_id?: string
   name: string
-  type: 'dingtalk' | 'feishu' | 'bark' | 'email' | 'webhook' | 'wechat' | 'telegram' | 'pushplus'
+  type: 'dingtalk' | 'feishu' | 'bark' | 'email' | 'email_api' | 'webhook' | 'wechat' | 'telegram' | 'pushplus'
   channel_type?: string
   channel_name?: string
   channel_config?: string

@@ -404,6 +404,67 @@ async def send_email_notification(
         return False
 
 
+async def send_email_api_notification(
+    config_data: Dict[str, Any],
+    message: str,
+    title: str = None,
+) -> bool:
+    """通过第三方邮件 HTTP 接口发送通知（接口地址、标题、正文全部可配置）
+
+    配置字段：
+        api_url: 邮件网关地址，可自带鉴权等固定查询参数，例如
+                 http://host:60004/<token>/60005/send?password=xxx&App=监控告警
+        title:   邮件标题（可选，默认「闲鱼自动回复通知」）
+        method:  GET（默认）/ POST
+        timeout: 超时秒数，默认 10
+
+    发送时把 title / message 合并进查询串（同名参数会被覆盖），
+    因此换网关只需改 api_url，无需改代码。
+    """
+    try:
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+        api_url = (config_data.get('api_url') or config_data.get('webhook_url') or '').strip()
+        if not api_url:
+            logger.warning("📱 邮件接口通知 - api_url 配置为空")
+            return False
+
+        mail_title = title or config_data.get('title') or '闲鱼自动回复通知'
+        method = (config_data.get('method') or 'GET').upper()
+        try:
+            timeout = int(config_data.get('timeout') or 10)
+        except (TypeError, ValueError):
+            timeout = 10
+
+        parts = urlsplit(api_url)
+        query = dict(parse_qsl(parts.query, keep_blank_values=True))
+        query['title'] = mail_title
+        query['message'] = message
+        url = urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)
+        )
+
+        async with aiohttp.ClientSession() as session:
+            request = session.post if method == 'POST' else session.get
+            async with request(url, timeout=timeout) as response:
+                text = await response.text()
+                if response.status != 200:
+                    logger.warning(
+                        f"📱 邮件接口通知发送失败: HTTP {response.status} {text[:200]}"
+                    )
+                    return False
+                # 网关返回 {"ok": false, ...} 视为失败，其余 200 一律算成功
+                if '"ok":false' in text.replace(' ', '').lower():
+                    logger.warning(f"📱 邮件接口通知被网关拒绝: {text[:200]}")
+                    return False
+                logger.info(f"📱 邮件接口通知发送成功: {text[:200]}")
+                return True
+
+    except Exception as e:
+        logger.error(f"📱 发送邮件接口通知异常: {e}")
+        return False
+
+
 async def send_webhook_notification(config_data: Dict[str, Any], message: str) -> bool:
     """发送Webhook通知"""
     try:

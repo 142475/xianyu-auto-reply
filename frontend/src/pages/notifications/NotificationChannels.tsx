@@ -102,6 +102,19 @@ const channelTypes = [
       template: "txt"
     }
   },
+  {
+    type: 'email_api',
+    label: '邮件接口',
+    desc: '第三方邮件网关',
+    icon: Mail,
+    placeholder: '{"api_url": "http://host:60004/<token>/60005/send?password=xxx&App=监控告警", "title": "闲鱼未读消息"}',
+    defaultConfig: {
+      api_url: "http://你的邮件网关/send?password=你的口令&App=监控告警",
+      title: "闲鱼未读消息",
+      method: "GET",
+      timeout: 10
+    }
+  },
 ] as const
 
 type ChannelType = typeof channelTypes[number]['type']
@@ -446,6 +459,7 @@ export function NotificationChannels() {
       case 'telegram': return '需要填写Bot Token和Chat ID'
       case 'pushplus': return '需要填写PushPlus的token，topic为群组编码（可选）'
       case 'webhook': return '填写自定义Webhook URL'
+      case 'email_api': return '填写邮件网关地址（可自带鉴权等固定参数），系统会把 title 和 message 拼到查询串上，换网关只改这一处'
       default: return ''
     }
   }

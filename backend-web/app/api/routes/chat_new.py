@@ -372,6 +372,17 @@ async def get_messages(
                 messages.append(msg_info)
         messages.reverse()
 
+        # 标记会话已读：websocket 侧据此判断消息是否超时未读，决定要不要发邮件通知
+        try:
+            redis_client = await get_redis_client()
+            await redis_client.set(
+                f"chat_read:{account_id}:{cid}",
+                int(time.time()),
+                ex=7 * 24 * 3600,
+            )
+        except Exception as e:
+            logger.warning(f"【{account_id}】写入会话已读标记失败: {e}")
+
         return ApiResponse(
             success=True,
             data={

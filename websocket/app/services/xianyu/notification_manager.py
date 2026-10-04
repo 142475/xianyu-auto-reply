@@ -20,6 +20,7 @@ from common.utils.notification_utils import (
     send_feishu_notification,
     send_bark_notification,
     send_email_notification,
+    send_email_api_notification,
     send_webhook_notification,
     send_wechat_notification,
     send_telegram_notification,
@@ -38,6 +39,10 @@ class NotificationManager:
     # 与 XianyuSliderStealth._send_account_disabled_notification 临时新建实例），
     # 也共享同一份冷却记录，避免短时间内发送多条重复通知。
     _shared_last_notification_time: dict = {}
+
+    # 未读延迟通知的待发任务 / 首次到达时间（按 cookie_id 共享，与上面的时间戳同源）
+    _shared_pending_unread: dict = {}
+    _shared_pending_first: dict = {}
     
     def __init__(self, cookie_id: str):
         """初始化通知管理器
@@ -54,6 +59,11 @@ class NotificationManager:
         self.notification_cooldown = 300  # 5分钟
         self.token_refresh_notification_cooldown = 10800  # 3小时
         self.notification_lock = asyncio.Lock()
+
+        # 未读延迟通知：消息到达后等待 unread_notify_delay 秒，仍未读才发送
+        self.unread_notify_delay = 300  # 5分钟
+        self._pending_unread = NotificationManager._shared_pending_unread
+        self._pending_first = NotificationManager._shared_pending_first
     
     def _safe_str(self, e) -> str:
         """安全地将异常转换为字符串（委托公共实现）"""
@@ -132,26 +142,103 @@ class NotificationManager:
                              f"消息内容: {send_message}\n" \
                              f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
 
-            # 发送通知到各渠道
-            await self._send_to_channels(
-                notifications,
-                notification_msg,
-                template_type="chat",
-                template_context={
-                    "account": account_desc,
-                    "account_id": self.cookie_id,
-                    "account_remark": remark or "未知",
-                    "buyer_nick": send_user_name or "未知",
-                    "buyer_id": send_user_id or "未知",
-                    "message": send_message or "",
-                    "item_id": item_id or "未知",
-                    "chat_id": chat_id or "未知",
-                    "time": time.strftime('%Y-%m-%d %H:%M:%S'),
+            # 延迟发送：等 unread_notify_delay 秒后确认会话仍未被读取才发通知
+            self._schedule_unread_notification(
+                chat_id or f"unknown_{send_user_id}",
+                {
+                    "chat_id": chat_id,
+                    "notifications": notifications,
+                    "message": notification_msg,
+                    "context": {
+                        "account": account_desc,
+                        "account_id": self.cookie_id,
+                        "account_remark": remark or "未知",
+                        "buyer_nick": send_user_name or "未知",
+                        "buyer_id": send_user_id or "未知",
+                        "message": send_message or "",
+                        "item_id": item_id or "未知",
+                        "chat_id": chat_id or "未知",
+                        "time": time.strftime('%Y-%m-%d %H:%M:%S'),
+                    },
                 },
             )
 
         except Exception as e:
             logger.error(f"📱 处理消息通知失败: {self._safe_str(e)}")
+
+    def _schedule_unread_notification(self, key: str, payload: dict) -> None:
+        """登记一条「延迟到仍未读才发」的通知任务
+
+        同一会话重复到达时取消旧任务并沿用首次到达时间，
+        这样买家连发多条，只在首条满 unread_notify_delay 秒后发一次。
+
+        ponytail: 待发任务只在进程内存，websocket 重启会丢；
+        若要求重启后仍补发，改成落库 + 定时扫描。
+        """
+        now = int(time.time())
+        first_at = self._pending_first.get(key)
+        if first_at is None:
+            first_at = now
+        self._pending_first[key] = first_at
+        payload['first_at'] = first_at
+        payload['received_at'] = now
+
+        prev = self._pending_unread.get(key)
+        if prev and not prev.done():
+            prev.cancel()
+
+        delay = max(0, self.unread_notify_delay - (now - first_at))
+        self._pending_unread[key] = asyncio.create_task(
+            self._delayed_unread_send(key, payload, delay)
+        )
+
+    async def _delayed_unread_send(self, key: str, payload: dict, delay: int) -> None:
+        """延迟到期后检查已读标记，仍未读才发送通知"""
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        finally:
+            if self._pending_unread.get(key) is asyncio.current_task():
+                self._pending_unread.pop(key, None)
+
+        self._pending_first.pop(key, None)
+
+        if await self._is_conversation_read(payload.get('chat_id'), payload['received_at']):
+            logger.info(f"📱 会话 {payload.get('chat_id')} 已读，跳过未读通知")
+            return
+
+        logger.info(
+            f"📱 会话 {payload.get('chat_id')} 超过 {self.unread_notify_delay} 秒未读，发送通知"
+        )
+        await self._send_to_channels(
+            payload['notifications'],
+            payload['message'],
+            template_type="chat",
+            template_context=payload['context'],
+        )
+
+    async def _is_conversation_read(self, chat_id: str, received_at: int) -> bool:
+        """会话是否已被读取
+
+        网页端打开会话时 backend-web 会写 chat_read:{账号}:{cid} 标记，
+        这里读同一个 Redis key；读不到或异常一律按「未读」处理（宁可多发）。
+        """
+        if not chat_id:
+            return False
+        try:
+            from common.db.redis_client import get_redis_client
+
+            client = await get_redis_client()
+            raw = await client.get(f"chat_read:{self.cookie_id}:{chat_id}")
+            if not raw:
+                return False
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            return int(raw) >= received_at
+        except Exception as e:
+            logger.warning(f"📱 读取会话已读标记失败: {self._safe_str(e)}")
+            return False
 
     async def send_delivery_failure_notification(self, send_user_name: str, send_user_id: str,
                                                   item_id: str, error_message: str, chat_id: str = None,
@@ -458,6 +545,11 @@ class NotificationManager:
                     notification_sent = True
                 elif channel_type == 'email':
                     await send_email_notification(config_data, channel_message, attachment_path)
+                    notification_sent = True
+                elif channel_type in ('email_api', 'mail_api', 'email_http'):
+                    await send_email_api_notification(
+                        config_data, channel_message, config_data.get('title')
+                    )
                     notification_sent = True
                 elif channel_type == 'webhook':
                     await send_webhook_notification(config_data, channel_message)
